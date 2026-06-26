@@ -26,4 +26,9 @@ RUN python -c "from huggingface_hub import hf_hub_download; import os,shutil; os
 # 标记依赖已装,跳过 wrapper 首次运行时的运行时 pip 自装(serverless 内不宜联网装包)
 RUN touch /root/.latentsync16_dependencies_installed
 
-# worker-comfyui 自带 serverless handler 作为 ENTRYPOINT,无需覆盖。
+# ---- 给 handler 打补丁:让它把 VHS 视频输出(gifs/videos)也返回 ----
+# 原版 worker-comfyui handler 只回 images 键,会丢掉对口型 mp4(在 gifs 键)。
+COPY patch_handler.py /tmp/patch_handler.py
+RUN python /tmp/patch_handler.py /handler.py && python -m py_compile /handler.py
+
+# 入口仍是 base 镜像的 /start.sh(启动 ComfyUI + patched /handler.py),无需覆盖。

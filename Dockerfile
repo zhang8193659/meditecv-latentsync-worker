@@ -42,17 +42,15 @@ RUN cd /comfyui/custom_nodes && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir eva-decord
 
-# torchcodec: needed at runtime by LatentSync ("TorchCodec is required for save_with_torchcodec"),
-# NOT in the node's requirements.txt. Hard rule: it must NOT change torch — the base's torch is a
-# CUDA build; any torch swap breaks ComfyUI startup and the serverless worker gets stuck
-# "initializing" (invisible, no logs). So we:
-#   (a) pin torch to the EXACT installed version via a constraints file, so pip selects a torchcodec
-#       compatible with it and NEVER touches torch (if none is compatible, the build fails here);
-#   (b) verify torchcodec actually IMPORTS at build time -> a broken torchcodec fails the BUILD
-#       (visible via GitBuild.state=FAILED) instead of silently crash-looping worker startup.
-RUN python -c "import torch;print('torch=='+torch.__version__.split('+')[0])" > /tmp/torch-constraint.txt && \
-    echo "pinning torch: $(cat /tmp/torch-constraint.txt)" && \
-    pip install --no-cache-dir -c /tmp/torch-constraint.txt torchcodec && \
+# torchcodec: runtime dep of LatentSync ("TorchCodec is required for save_with_torchcodec"), NOT in
+# the node's requirements.txt. It must be the CUDA-matched wheel or it drags in a mismatched torch
+# and breaks ComfyUI startup (worker stuck "initializing", no logs). The base has torch 2.12.0+cu126
+# (verified by inspecting the base image), and the PyTorch cu126 index publishes torchcodec built for
+# that exact torch. Installing from THAT index (not PyPI) gets an ABI-matched torchcodec==0.14.0+cu126
+# WITHOUT touching torch (confirmed by `pip install --dry-run` inside the base image: "Would install
+# torchcodec-0.14.0+cu126" only). We verify it IMPORTS at build time so any break fails the BUILD
+# (visible via GitBuild.state=FAILED) instead of silently crash-looping worker startup.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu126 "torchcodec==0.14.0" && \
     python -c "import torch, torchcodec; print('IMPORT OK: torch', torch.__version__, '| torchcodec', torchcodec.__version__)"
 
 # The wrapper checks ~/.latentsync16_dependencies_installed at first import and, if absent, runs

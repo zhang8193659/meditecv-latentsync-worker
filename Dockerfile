@@ -42,6 +42,18 @@ RUN cd /comfyui/custom_nodes && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir eva-decord
 
+# torchcodec: LatentSync uses it for video I/O (runtime error "TorchCodec is required for
+# save_with_torchcodec"). It is NOT in the node's requirements.txt but IS needed at runtime, and
+# its wheels are ABI-matched to the EXACT torch minor. The base image's torch is pulled by ComfyUI
+# (not pinned), so we detect it at build time and install the matching torchcodec series:
+#   torch 2.4->tc0.1  2.5->0.2  2.6->0.3  2.7->0.4  2.8->0.5  2.9->0.6  (else: unpinned).
+RUN TV=$(python -c "import torch;print('.'.join(torch.__version__.split('+')[0].split('.')[:2]))") && \
+    case "$TV" in \
+      2.4) TC=0.1;; 2.5) TC=0.2;; 2.6) TC=0.3;; 2.7) TC=0.4;; 2.8) TC=0.5;; 2.9) TC=0.6;; *) TC="";; \
+    esac && \
+    echo "detected torch=$TV -> torchcodec=${TC:-latest}" && \
+    if [ -n "$TC" ]; then pip install --no-cache-dir "torchcodec==$TC.*"; else pip install --no-cache-dir torchcodec; fi
+
 # The wrapper checks ~/.latentsync16_dependencies_installed at first import and, if absent, runs
 # `pip install` at RUNTIME (bad in serverless). Deps are installed above at build time, so set the
 # flag to skip that runtime path. (Verified in nodes.py @ pinned commit 360d5283.)

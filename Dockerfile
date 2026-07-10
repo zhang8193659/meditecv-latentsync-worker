@@ -24,14 +24,11 @@
 #       RunPod build log (weight HIT/MISS lines + node install output). See README + handoff.
 # =====================================================================================
 
-ARG WORKER_COMFYUI_VERSION=5.8.6
-FROM runpod/worker-comfyui:${WORKER_COMFYUI_VERSION}-base
-
-# Pin the custom nodes to exact commits (reproducible builds; overridable at build time).
-#   VHS         : main @ 2026-05-10 (no release tags exist; pinned by SHA)
-#   LatentSync  : main @ 2025-09-04
-ARG VHS_REF=4ee72c065db22c9d96c2427954dc69e7b908444b
-ARG LATENTSYNC_REF=360d5283d7276aee68b4237b1387e594e4ce640e
+# FROM tag is HARDCODED (not a build ARG). RunPod's GitHub-build validator statically parses the
+# Dockerfile before building and rejects a build-arg-templated FROM with "Invalid Dockerfile
+# configuration" (it can't resolve ${...} at parse time). The prior working build used this exact
+# concrete tag. Custom-node commits are likewise inlined below (no ARG) to keep the file plain.
+FROM runpod/worker-comfyui:5.8.6-base
 
 USER root
 
@@ -54,7 +51,7 @@ WORKDIR /comfyui/custom_nodes
 # and VHS_VideoCombine (frames + audio -> mp4). Both are required by the lipsync graph.
 RUN git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
     cd ComfyUI-VideoHelperSuite && \
-    git checkout ${VHS_REF} && \
+    git checkout 4ee72c065db22c9d96c2427954dc69e7b908444b && \
     { python -m pip install --no-cache-dir -r requirements.txt || uv pip install --no-cache-dir -r requirements.txt; }
 
 # ComfyUI-LatentSyncWrapper: supplies LatentSyncNode + VideoLengthAdjuster.
@@ -64,7 +61,7 @@ RUN git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
 #     If the upstream `decord` ever ships a working wheel you may delete the sed + eva line.
 RUN git clone https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper.git && \
     cd ComfyUI-LatentSyncWrapper && \
-    git checkout ${LATENTSYNC_REF} && \
+    git checkout 360d5283d7276aee68b4237b1387e594e4ce640e && \
     sed -i '/^decord/d;/^ *decord/d' requirements.txt && \
     { python -m pip install --no-cache-dir -r requirements.txt || uv pip install --no-cache-dir -r requirements.txt; } && \
     { python -m pip install --no-cache-dir eva-decord || uv pip install --no-cache-dir eva-decord; }

@@ -1,0 +1,14 @@
+# Keep the build context tiny: the Dockerfile only needs
+#   download_models.py, patch_handler.py, workflows/latentsync_lipsync.json
+# Everything else (docs, tests, git) is excluded.
+.git
+.gitignore
+README.md
+给同事解锁-latentsync-worker.md
+test/
+*.md
+.DS_Store
+__pycache__/
+*.pyc
+out.mp4
+.env

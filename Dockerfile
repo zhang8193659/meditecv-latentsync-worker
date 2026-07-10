@@ -1,34 +1,99 @@
-# mEditEcv —— LatentSync 对口型 RunPod Serverless worker
-# 基础:runpod/worker-comfyui(ComfyUI + serverless handler,不含模型)
-# 在其上装 LatentSync + VideoHelperSuite 自定义节点,并把权重「烤」进镜像,
-# 避免 serverless 冷启动时现下 5G 权重导致首请求超时。
-FROM runpod/worker-comfyui:5.8.6-base
+# meditecv-latentsync-worker
+# =====================================================================================
+# RunPod worker-comfyui image for LatentSync video-to-video re-lipsync (mEditEcv L2).
+#
+# Capability: given an I2V-generated shot video (frames) + a voiceover audio,
+#   re-synthesize the mouth region so lips match the audio -> return a talking-head mp4.
+#
+# Contract (identical to the sibling i2v worker):
+#   request : {"input":{"workflow":<comfy API prompt>,"images":[{name,image(base64)}...]}}
+#             worker writes each base64 blob into ComfyUI input/ under `name`; the workflow
+#             nodes reference those filenames (video + audio both ride the images[] channel).
+#   response: COMPLETED -> output.images[] ; VHS_VideoCombine's mp4 is base64 in there
+#             (see patch_handler.py, which teaches the stock handler to also emit gifs/videos).
+#
+# All facts below were verified from source (see README "Verified facts / sources"):
+#   - base image           : runpod/worker-comfyui:5.8.6-base  (latest release 2026-06-17)
+#   - ComfyUI root          : /comfyui   (WORKDIR)   ;  venv: /opt/venv (already on PATH)
+#   - custom node CLI        : comfy-node-install (on PATH)  -- we git-clone+pin instead for reproducibility
+#   - LatentSync nodes       : ShmuelRonen/ComfyUI-LatentSyncWrapper  (LatentSyncNode, VideoLengthAdjuster)
+#   - video load/combine     : Kosinkadink/ComfyUI-VideoHelperSuite   (VHS_LoadVideo, VHS_VideoCombine)
+#   - weights (PUBLIC, no HF token needed): ByteDance/LatentSync-1.6  +  stabilityai/sd-vae-ft-mse
+#
+# NOTE: This image has NOT been GPU/RunPod-validated. It is push-ready; iterate from the
+#       RunPod build log (weight HIT/MISS lines + node install output). See README + handoff.
+# =====================================================================================
 
-# ---- 自定义节点 ----
-# VideoHelperSuite:提供 VHS_VideoCombine(把帧+音频合成 mp4)
-RUN cd /comfyui/custom_nodes && \
-    git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
-    pip install -r ComfyUI-VideoHelperSuite/requirements.txt
+ARG WORKER_COMFYUI_VERSION=5.8.6
+FROM runpod/worker-comfyui:${WORKER_COMFYUI_VERSION}-base
 
-# LatentSync wrapper:提供 LatentSyncNode(对口型推理)+ VideoLengthAdjuster(loop_to_audio
-# 把单张静图循环成匹配音频时长的帧序列 —— ecv 只给一张人物图,靠它扩成视频喂 LatentSync)
-RUN cd /comfyui/custom_nodes && \
-    git clone --depth 1 https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper.git && \
-    pip install -r ComfyUI-LatentSyncWrapper/requirements.txt
+# Pin the custom nodes to exact commits (reproducible builds; overridable at build time).
+#   VHS         : main @ 2026-05-10 (no release tags exist; pinned by SHA)
+#   LatentSync  : main @ 2025-09-04
+ARG VHS_REF=4ee72c065db22c9d96c2427954dc69e7b908444b
+ARG LATENTSYNC_REF=360d5283d7276aee68b4237b1387e594e4ce640e
 
-# ---- 预烤权重(构建期下好,冷启动零下载)----
-# LatentSync 1.6 UNet + whisper tiny → 节点的 checkpoints/(节点 setup_models 期望路径)
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='ByteDance/LatentSync-1.6', allow_patterns=['latentsync_unet.pt','whisper/tiny.pt'], local_dir='/comfyui/custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints')"
+USER root
 
-# s3fd 人脸检测器 → ~/.latentsync16_models/(节点 pre_download_models 期望路径与文件名)
-RUN python -c "from huggingface_hub import hf_hub_download; import os,shutil; os.makedirs('/root/.latentsync16_models',exist_ok=True); p=hf_hub_download(repo_id='vinthony/SadTalker', filename='hub/checkpoints/s3fd-619a316812.pth'); shutil.copy(p,'/root/.latentsync16_models/s3fd-e19a316812.pth')"
+# --- System libraries -----------------------------------------------------------------
+# ffmpeg is a hard requirement of LatentSync (must be on PATH) and VHS.
+# libgl1 / libglib2.0-0 : opencv + mediapipe runtime libs (Ubuntu 24.04 uses libgl1, not -mesa-glx).
+# libsndfile1           : soundfile.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+        libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# 标记依赖已装,跳过 wrapper 首次运行时的运行时 pip 自装(serverless 内不宜联网装包)
+# --- Custom nodes ---------------------------------------------------------------------
+WORKDIR /comfyui/custom_nodes
+
+# VideoHelperSuite: supplies VHS_LoadVideo (source video -> IMAGE frame batch + AUDIO)
+# and VHS_VideoCombine (frames + audio -> mp4). Both are required by the lipsync graph.
+RUN git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
+    cd ComfyUI-VideoHelperSuite && \
+    git checkout ${VHS_REF} && \
+    { python -m pip install --no-cache-dir -r requirements.txt || uv pip install --no-cache-dir -r requirements.txt; }
+
+# ComfyUI-LatentSyncWrapper: supplies LatentSyncNode + VideoLengthAdjuster.
+# Known build friction handled inline:
+#   * `decord` (in its requirements) has no reliable wheel on Ubuntu 24.04 / py3.12 ->
+#     drop it and install the drop-in fork `eva-decord`, which provides `import decord`.
+#     If the upstream `decord` ever ships a working wheel you may delete the sed + eva line.
+RUN git clone https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper.git && \
+    cd ComfyUI-LatentSyncWrapper && \
+    git checkout ${LATENTSYNC_REF} && \
+    sed -i '/^decord/d;/^ *decord/d' requirements.txt && \
+    { python -m pip install --no-cache-dir -r requirements.txt || uv pip install --no-cache-dir -r requirements.txt; } && \
+    { python -m pip install --no-cache-dir eva-decord || uv pip install --no-cache-dir eva-decord; }
+
+# The wrapper checks ~/.latentsync16_dependencies_installed at first import and, if ABSENT, runs
+# `pip install` at RUNTIME (bad in serverless: slow first request + offline-fragile). All Python
+# deps are installed above at build time, so set the flag to skip that runtime path.
+# (Verified in ComfyUI-LatentSyncWrapper nodes.py @ pinned commit 360d5283.)
 RUN touch /root/.latentsync16_dependencies_installed
 
-# ---- 给 handler 打补丁:让它把 VHS 视频输出(gifs/videos)也返回 ----
-# 原版 worker-comfyui handler 只回 images 键,会丢掉对口型 mp4(在 gifs 键)。
-COPY patch_handler.py /tmp/patch_handler.py
-RUN python /tmp/patch_handler.py /handler.py && python -m py_compile /handler.py
+# --- Teach the stock handler to return VHS video outputs as base64 --------------------
+# The stock worker-comfyui handler only collects node_output["images"]; VHS_VideoCombine
+# writes its mp4 under node_output["gifs"]. patch_handler.py surgically extends the
+# collector to also walk "gifs"/"videos". It FAILS the build (nonzero exit) if it cannot
+# find/patch the handler, so a base-image change is loud rather than silently dropping video.
+COPY patch_handler.py /patch_handler.py
+RUN python /patch_handler.py
 
-# 入口仍是 base 镜像的 /start.sh(启动 ComfyUI + patched /handler.py),无需覆盖。
+# --- Reference workflow (informational; the real prompt is sent per-request) ----------
+# The authoritative workflow is proj/backend/.../comfyui_workflows/latentsync_lipsync.json,
+# sent inside each /run payload. This copy documents the graph the image is built to satisfy.
+COPY workflows/latentsync_lipsync.json /workflows/latentsync_lipsync.json
+
+# --- Bake model weights (LAST: biggest layer, so node/patch edits don't re-pull ~7GB) -
+# download_models.py enumerates the REAL repo file list via HfApi().list_repo_files (never
+# guesses subpaths), matches by filename, prints HIT/MISS per file, and exits nonzero if any
+# inference-critical file is missing. Repos are PUBLIC (gated=false) -> no HF token required.
+COPY download_models.py /download_models.py
+RUN python /download_models.py
+
+# Reset workdir for the base image's entrypoint (CMD ["/start.sh"] is inherited).
+WORKDIR /comfyui

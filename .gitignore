@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Model weights must NEVER be committed (they are baked at build time from HuggingFace).
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.model
+*.pkl
+checkpoints/
+.latentsync16_models/
+
+# Test artifacts / local media / secrets
+out.mp4
+*.local.*
+.env
+test/*.mp4
+test/*.mp3
+test/*.wav
+!test/run_lipsync_test.py
+
+# OS
+.DS_Store

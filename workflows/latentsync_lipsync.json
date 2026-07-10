@@ -1,0 +1,60 @@
+{
+  "_comment": "mEditEcv LatentSync VIDEO-TO-VIDEO re-lipsync (self-authored ComfyUI API-format graph; not copied source). Given an I2V-generated shot VIDEO + a voiceover audio, re-synthesize the mouth so lips match the audio. Nodes verified against ShmuelRonen/ComfyUI-LatentSyncWrapper (LatentSyncNode, VideoLengthAdjuster) and Kosinkadink/ComfyUI-VideoHelperSuite (VHS_LoadVideo, VHS_VideoCombine). DIFF vs the proj copy comfyui_workflows/latentsync_lipsync.json: proj node 10 is `LoadImage` feeding VideoLengthAdjuster mode=loop_to_audio (that is the SINGLE-STILL-IMAGE path — it fakes a video from one photo and does NOT accept a real video). Here node 10 is `VHS_LoadVideo` (decodes a real mp4 to a frame batch) and node 20 mode=normal (keep the source motion, only reconcile length to audio). PLACEHOLDERS: __IMAGE_FILENAME__ now carries a VIDEO filename (e.g. source_video.mp4 — it MUST have a video extension so VHS_LoadVideo loads it); __AUDIO_FILENAME__=voiceover; __OUTPUT_PREFIX__=output name; __FPS__=pipeline fps (provider replaces the string \"__FPS__\" with an INTEGER — never a quoted string). We standardize the whole graph on one __FPS__ (load force_rate = adjuster fps = combine frame_rate) so audio/video stay in sync; LatentSync-1.6 is trained at 25fps, so if the pipeline fps (COMPOSE_FPS=30) hurts quality, hardcode 25 on nodes 10/20/40. TO WIRE INTO proj (do NOT do it this round — see handoff): (1) drop this file over comfyui_workflows/latentsync_lipsync.json; (2) provider runpod_serverless_digitalhuman_provider.py: change _IMAGE_NAME from 'presenter.png' to 'source_video.mp4'; (3) gen_lipsync_video.py: feed the shot's I2V video bytes (shot.video_asset_id) as `image=` instead of the presenter still. No _fill_placeholders change is needed because __IMAGE_FILENAME__ is reused.",
+  "10": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "__IMAGE_FILENAME__",
+      "force_rate": "__FPS__",
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1
+    },
+    "_meta": { "title": "load source shot video (I2V mp4) -> frame batch" }
+  },
+  "11": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "__AUDIO_FILENAME__"
+    },
+    "_meta": { "title": "voiceover audio" }
+  },
+  "20": {
+    "class_type": "VideoLengthAdjuster",
+    "inputs": {
+      "images": ["10", 0],
+      "audio": ["11", 0],
+      "mode": "normal",
+      "fps": "__FPS__",
+      "silent_padding_sec": 0.5
+    },
+    "_meta": { "title": "reconcile source frame count to voiceover length (mode=normal keeps real motion)" }
+  },
+  "25": {
+    "class_type": "LatentSyncNode",
+    "inputs": {
+      "images": ["20", 0],
+      "audio": ["20", 1],
+      "seed": 42,
+      "lips_expression": 1.5,
+      "inference_steps": 20
+    },
+    "_meta": { "title": "LatentSync-1.6 re-lipsync (weights baked in image; no cold-start download)" }
+  },
+  "40": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": ["25", 0],
+      "audio": ["20", 1],
+      "frame_rate": "__FPS__",
+      "loop_count": 0,
+      "filename_prefix": "__OUTPUT_PREFIX__",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_output": true
+    },
+    "_meta": { "title": "combine lipsynced frames + voiceover -> mp4 (returned as base64 via patched handler)" }
+  }
+}

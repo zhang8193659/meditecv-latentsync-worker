@@ -44,14 +44,15 @@ RUN cd /comfyui/custom_nodes && \
 
 # torchcodec: runtime dep of LatentSync ("TorchCodec is required for save_with_torchcodec"), NOT in
 # the node's requirements.txt. It must be the CUDA-matched wheel or it drags in a mismatched torch
-# and breaks ComfyUI startup (worker stuck "initializing", no logs). The base has torch 2.12.0+cu126
-# (verified by inspecting the base image), and the PyTorch cu126 index publishes torchcodec built for
-# that exact torch. Installing from THAT index (not PyPI) gets an ABI-matched torchcodec==0.14.0+cu126
-# WITHOUT touching torch (confirmed by `pip install --dry-run` inside the base image: "Would install
-# torchcodec-0.14.0+cu126" only). We verify it IMPORTS at build time so any break fails the BUILD
-# (visible via GitBuild.state=FAILED) instead of silently crash-looping worker startup.
-# Install (MUST succeed): the cu126 wheel is ABI-matched to torch 2.12.0+cu126 and doesn't touch torch.
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu126 "torchcodec==0.14.0"
+# and breaks ComfyUI startup (worker stuck "initializing", no logs). The base ships torch 2.12.0+cu130
+# (real-machine verified on the RunPod GPU: `torch.__version__` == 2.12.0+cu130 — an earlier build
+# wrongly assumed cu126 and installed torchcodec+cu126, an ABI mismatch that crash-looped startup).
+# The PyTorch cu130 index publishes torchcodec built for that exact torch, so installing from THAT
+# index (not PyPI) gets an ABI-matched torchcodec==0.14.0+cu130 WITHOUT touching torch. We verify it
+# IMPORTS at build time so any break fails the BUILD (visible via GitBuild.state=FAILED) instead of
+# silently crash-looping worker startup.
+# Install (MUST succeed): the cu130 wheel is ABI-matched to torch 2.12.0+cu130 and doesn't touch torch.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 "torchcodec==0.14.0"
 # Import check (BEST-EFFORT, non-fatal): torchcodec is a CUDA extension; at BUILD time there is no
 # GPU/driver, so `import torchcodec` may fail loading libcuda even though it is fine at runtime. So we
 # do NOT fail the build on it — the install above already succeeded, and the worker imports it at
